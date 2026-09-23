@@ -57,6 +57,83 @@ class ModelCacheTests(unittest.TestCase):
     def test_disk_usage_zero_when_absent(self):
         self.assertEqual(judge.model_disk_usage(), 0)
 
+    def test_snapshot_dir_resolves_refs_main_first(self):
+        """#95: offline loading hands from_pretrained the snapshot refs/main pins."""
+        base = self.root / "hub" / "models--Mapika--decider-2b"
+        refs = base / "refs"
+        refs.mkdir(parents=True)
+        (refs / "main").write_text("abc123")
+        snap = base / "snapshots" / "abc123"
+        snap.mkdir(parents=True)
+        (snap / "model.safetensors").write_bytes(b"\0" * 8)
+        self.assertEqual(judge.cached_snapshot_dir(), str(snap))
+
+    def test_snapshot_dir_falls_back_to_newest_weighted(self):
+        base = self.root / "hub" / "models--Mapika--decider-2b"
+        old, new = base / "snapshots" / "old1", base / "snapshots" / "new2"
+        for s, weight in ((old, False), (new, True)):
+            s.mkdir(parents=True)
+            if weight:
+                (s / "model.safetensors").write_bytes(b"\0" * 8)
+        os.utime(old, (1, 1))          # dangling old snapshot loses to the weighted one
+        self.assertEqual(judge.cached_snapshot_dir(), str(new))
+
+    def test_snapshot_dir_none_without_weights_anywhere(self):
+        _fake_cache(self.root, weights=False)
+        self.assertIsNone(judge.cached_snapshot_dir())
+
+
+class EndpointFallbackTests(unittest.TestCase):
+    """#95: the mirror decision — explicit config wins, unreachable default falls back."""
+
+    def setUp(self):
+        self.addCleanup(os.environ.pop, "HF_ENDPOINT", None)
+        os.environ.pop("HF_ENDPOINT", None)
+
+    def test_explicit_endpoint_wins_untouched(self):
+        os.environ["HF_ENDPOINT"] = "https://my-own-endpoint.example"
+        with mock.patch.object(judge.urllib.request, "urlopen", side_effect=AssertionError):
+            self.assertIsNone(judge.ensure_download_endpoint())
+        self.assertEqual(os.environ["HF_ENDPOINT"], "https://my-own-endpoint.example")
+
+    def test_reachable_default_keeps_default_endpoint(self):
+        with mock.patch.object(judge.urllib.request, "urlopen") as urlopen:
+            self.assertIsNone(judge.ensure_download_endpoint())
+        urlopen.assert_called_once()
+        self.assertIsNone(os.environ.get("HF_ENDPOINT"))
+
+    def test_unreachable_default_switches_to_mirror(self):
+        import urllib.error
+        with mock.patch.object(judge.urllib.request, "urlopen",
+                               side_effect=urllib.error.URLError("timeout")):
+            self.assertEqual(judge.ensure_download_endpoint(), judge.FALLBACK_ENDPOINT)
+        self.assertEqual(os.environ["HF_ENDPOINT"], judge.FALLBACK_ENDPOINT)
+
+
+class LoadSourceTests(unittest.TestCase):
+    """#95: _load 的加载源决策——已缓存走本地离线，未缓存先定端点。"""
+
+    def test_cached_snapshot_loads_offline_without_endpoint_probe(self):
+        with mock.patch.object(judge, "cached_snapshot_dir", return_value="/snap/x"), \
+             mock.patch.object(judge, "ensure_download_endpoint",
+                               side_effect=AssertionError) as ensure:
+            self.assertEqual(judge.resolve_load_source(), ("/snap/x", True))
+        ensure.assert_not_called()
+
+    def test_uncached_resolves_endpoint_then_repo(self):
+        with mock.patch.object(judge, "cached_snapshot_dir", return_value=None), \
+             mock.patch.object(judge, "ensure_download_endpoint",
+                               return_value=None) as ensure:
+            self.assertEqual(judge.resolve_load_source(), ("Mapika/decider-2b", False))
+        ensure.assert_called_once()
+
+    def test_uncached_mirror_switch_announces(self):
+        with mock.patch.object(judge, "cached_snapshot_dir", return_value=None), \
+             mock.patch.object(judge, "ensure_download_endpoint",
+                               return_value="https://hf-mirror.com"), \
+             mock.patch.dict(os.environ, {"HF_ENDPOINT": "https://hf-mirror.com"}):
+            self.assertEqual(judge.resolve_load_source(), ("Mapika/decider-2b", False))
+
 
 class DownloadGateTests(unittest.TestCase):
     def setUp(self):

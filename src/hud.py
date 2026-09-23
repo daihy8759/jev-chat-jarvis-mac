@@ -68,7 +68,11 @@ import userconfig  # noqa: E402
 
 userconfig.load()   # ~/.config/jev-jarvis/env -> os.environ (Finder apps inherit none)
 
-from perception import screen_capture_ok, request_screen_capture  # noqa: E402
+from perception import (  # noqa: E402
+    find_wechat_window,
+    screen_capture_ok,
+    request_screen_capture,
+)
 from apps.registry import APPS, UNKNOWN, frontmost_app  # noqa: E402  按前台 App 分发（微信 / QQ）
 import judge  # noqa: E402  (model_cached / model_disk_usage: the #38 onboarding + settings)
 from judge import LowMemoryError, ModelNotDownloadedError, make_judge  # noqa: E402
@@ -1612,6 +1616,17 @@ class HudController(NSObject):
         self._set_foreground_state(app)
         if app is None:
             return
+        # Follow the window from cheap metadata every tick, not from read results (#93):
+        # in manual-calibration mode one read is a full multi-second OCR, and positioning
+        # used to wait out two whole read cycles (the two-tick debounce) after a drag.
+        # Metadata-only enumeration, ~1-5 ms. Screen-capture apps only — QQ's panel
+        # follows its AX read path. The read path's applyPosition stays as a backstop;
+        # when both agree the dead-band absorbs the duplicate.
+        if not self._paused and getattr(app, "needs_screen_capture", False):
+            win = find_wechat_window(previous_wid=getattr(self, "_win_wid", None))
+            if win is not None:
+                self._position_near({"wid": win.wid, "x": win.x, "y": win.y,
+                                     "w": win.w, "h": win.h})
         if self._paused or self._busy or time.time() < self._next_read_ts:
             return  # paused, a previous read is still running, or not due yet
         self._busy = True
@@ -1751,9 +1766,10 @@ class HudController(NSObject):
             self._stable_n = 0
             self._next_read_ts = time.time() + SLOW_TICK
 
-        # position immediately: analysis takes seconds, and a delayed correction
-        # showed up as a visible jump after the verdict landed. Pushed on unchanged
-        # frames too — the window can move while its pixels stay identical.
+        # Position from the read result as a backstop only — tick_ now drives
+        # positioning from cheap metadata every tick (#93). This keeps the panel
+        # correct when the window moved mid-read; a same-target push is absorbed
+        # by the dead-band.
         live_window = res["window"]
         live_input_rect = res.get("input_rect")
         self._win_wid = res["window"]["wid"]
@@ -1798,6 +1814,12 @@ class HudController(NSObject):
         else:
             self._empty_frame_since = None
             self._last_full = res
+            # a picked-over window list was invisible in the logs and cost a whole
+            # misdiagnosis (#91): say which window the reads moved to, geometry only
+            if res["window"].get("wid") != getattr(self, "_read_wid", None):
+                self._read_wid = res["window"].get("wid")
+                _log(f"读屏窗口切换 wid={res['window'].get('wid')} "
+                     f"{res['window'].get('w', 0):.0f}x{res['window'].get('h', 0):.0f}")
             self._push("applyChat:", res.get("chat_title") or "")
 
         res = dict(res, window=live_window, input_rect=live_input_rect)
@@ -1908,13 +1930,9 @@ class HudController(NSObject):
                 # Vision loads on the first call and costs ~2x steady state; saying so keeps a
                 # one-off from being read as a regression (same reason the judge line does it)
                 note = "（首次，含 Vision 加载）" if first_read and t.get("ocr", 0) > 400 else ""
-                # say when the fast in-process capture was refused: otherwise a permanent
-                # fallback looks like ordinary slowness instead of something to report
-                slow_cap = " · 抓屏走了带超时的子进程" \
-                    if t.get("capture_path") == "subprocess" else ""
                 _log(f"读屏 抓取 {t.get('capture', 0):.0f}ms + OCR {t.get('ocr', 0):.0f}ms"
                      f" = {t.get('total', 0):.0f}ms · 读到 {len(msgs)} 条（对方 {len(thems)} 条）"
-                     f"{note}{slow_cap}")
+                     f"{note}")
                 _log(f"新消息 · 预判+生成先跑，停稳 {SETTLE_S}s（连续 {STABLE_READS} 跳不变最早 "
                      f"{EARLY_SETTLE_S}s）后上屏（两次完整分析最小间隔 {MIN_GAP_S}s）")
                 # latest-wins: overwrite the slot, retire the old verdict — only the newest

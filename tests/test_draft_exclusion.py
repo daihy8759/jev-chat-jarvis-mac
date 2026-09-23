@@ -71,8 +71,7 @@ class DraftExclusionTests(unittest.TestCase):
         with patch.object(p,'find_wechat_window',return_value=win), \
              patch.object(p,'capture_window',side_effect=lambda _wid, out: (out.write_bytes(b'png') or True)), \
              patch.object(p.Quartz,'CGImageSourceCreateWithData',return_value=object()), \
-             patch.object(p.Quartz,'CGImageSourceCreateImageAtIndex',return_value=object()), \
-             patch.object(p.Quartz,'CGImageCreateCopy',return_value=self.canvas()), \
+             patch.object(p.Quartz,'CGImageSourceCreateImageAtIndex',return_value=self.canvas()), \
              patch('input_region.input_outline',return_value=None), \
              patch('fill.locate_input',return_value={'rect':None}), \
              patch.object(p,'ocr_image',return_value=[block('草稿', .65)]):
@@ -85,8 +84,7 @@ class DraftExclusionTests(unittest.TestCase):
         with patch.object(p,'find_wechat_window',return_value=win), \
              patch.object(p,'capture_window',side_effect=lambda _wid, out: (out.write_bytes(b'png') or True)), \
              patch.object(p.Quartz,'CGImageSourceCreateWithData',return_value=object()), \
-             patch.object(p.Quartz,'CGImageSourceCreateImageAtIndex',return_value=object()), \
-             patch.object(p.Quartz,'CGImageCreateCopy',return_value=self.canvas()), \
+             patch.object(p.Quartz,'CGImageSourceCreateImageAtIndex',return_value=self.canvas()), \
              patch('input_region.input_outline',return_value=(.32,.6,.65,.39)), \
              patch.object(p,'_fingerprint',return_value=b'x'*100), \
              patch.object(p,'ocr_image',return_value=[block('消息', .5)]) as ocr:

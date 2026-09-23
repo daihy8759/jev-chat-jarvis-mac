@@ -13,6 +13,7 @@ import os
 import subprocess
 import threading
 import time
+import urllib.request
 
 import numpy as np
 
@@ -88,30 +89,97 @@ def model_cache_dir(repo: str = "Mapika/decider-2b") -> str:
     return os.path.join(base, "models--" + repo.replace("/", "--"))
 
 
-def model_cached(repo: str = "Mapika/decider-2b") -> bool:
-    """True when the HF cache already holds the model weights — never touches the network.
+def cached_snapshot_dir(repo: str = "Mapika/decider-2b") -> str | None:
+    """The local snapshot directory that actually holds weights, or None.
 
-    A snapshot counts only when it actually contains weights: isfile() resolves the
-    snapshot's symlinks into blobs/, so an interrupted or partially-cleaned download
-    (dangling weight links, blob-less snapshot) reads as not cached — otherwise the gate
-    would let from_pretrained silently re-download all ~7 GB (#38).
+    The snapshot refs/main pins wins (huggingface_hub's own layout); otherwise the
+    most recently modified snapshot carrying weights. Same completeness rule as
+    ever: isfile() resolves the snapshot's symlinks into blobs/, so an interrupted
+    or partially-cleaned download (dangling weight links, blob-less snapshot) reads
+    as absent — otherwise the gate would let from_pretrained silently re-download
+    all ~7 GB (#38). Never touches the network.
     """
-    snapshots = os.path.join(model_cache_dir(repo), "snapshots")
+    root = model_cache_dir(repo)
+    snapshots = os.path.join(root, "snapshots")
     try:
-        for entry in os.listdir(snapshots):
-            path = os.path.join(snapshots, entry)
-            if not os.path.isdir(path):
-                continue
-            try:
-                if any(f.endswith((".safetensors", ".bin"))
-                       and os.path.isfile(os.path.join(path, f))
-                       for f in os.listdir(path)):
-                    return True
-            except OSError:
-                continue
+        entries = [e for e in os.listdir(snapshots)
+                   if os.path.isdir(os.path.join(snapshots, e))]
     except OSError:
+        return None
+    if not entries:
+        return None
+    try:
+        with open(os.path.join(root, "refs", "main")) as fh:
+            pinned = fh.read().strip()
+    except OSError:
+        pinned = ""
+    newest = sorted(entries, key=lambda e: os.path.getmtime(
+        os.path.join(snapshots, e)), reverse=True)
+    ordered = ([pinned] if pinned in entries else []) + [e for e in newest if e != pinned]
+    for entry in ordered:
+        path = os.path.join(snapshots, entry)
+        try:
+            if any(f.endswith((".safetensors", ".bin"))
+                   and os.path.isfile(os.path.join(path, f))
+                   for f in os.listdir(path)):
+                return path
+        except OSError:
+            continue
+    return None
+
+
+def model_cached(repo: str = "Mapika/decider-2b") -> bool:
+    """True when the HF cache already holds the model weights — never touches the network."""
+    return cached_snapshot_dir(repo) is not None
+
+
+# huggingface.co is unreachable from mainland networks, where a first download that
+# hangs until timeout is the single biggest onboarding blocker (#95) — and even a
+# cached user paid a revision-check round trip (a timeout there) on every launch.
+# The community mirror proxies the same repo paths. huggingface_hub reads HF_ENDPOINT
+# at import time, so the decision must land before transformers is imported — which
+# _load() does lazily, after userconfig has loaded the user's env.
+DEFAULT_ENDPOINT = "https://huggingface.co"
+FALLBACK_ENDPOINT = "https://hf-mirror.com"
+
+
+def ensure_download_endpoint(timeout_s: float = 2.5) -> str | None:
+    """Settle the download endpoint before huggingface_hub is imported.
+
+    Returns the endpoint this call put in effect, None when the default stands. An
+    explicit HF_ENDPOINT (user env) always wins untouched. Otherwise one short HEAD
+    probe decides: default hub when reachable, the mirror when not — without the
+    probe a mainland user cannot tell "slow 3.8 GB" from "hung forever".
+    """
+    if os.environ.get("HF_ENDPOINT"):
+        return None
+    try:
+        request = urllib.request.Request(DEFAULT_ENDPOINT, method="HEAD")
+        urllib.request.urlopen(request, timeout=timeout_s).close()
+        return None
+    except Exception:
         pass
-    return False
+    os.environ["HF_ENDPOINT"] = FALLBACK_ENDPOINT
+    return FALLBACK_ENDPOINT
+
+
+def resolve_load_source(repo: str = "Mapika/decider-2b") -> tuple[str, bool]:
+    """(load_from, offline) for from_pretrained, settling the endpoint first.
+
+    Cached: the local snapshot and zero network — loading by repo id would make
+    transformers phone home for a revision check first, and from a mainland network
+    that check is a silent timeout on EVERY launch, paid in warm-up seconds plus an
+    HF_TOKEN warning (#95). Uncached (first authorized download): the repo id through
+    the endpoint ensure_download_endpoint() settled, so the download does not hang
+    before it starts.
+    """
+    snapshot = cached_snapshot_dir(repo)
+    if snapshot is not None:
+        return snapshot, True
+    if ensure_download_endpoint():
+        print(f"[jev-jarvis] huggingface.co 不可达，改用镜像 {os.environ['HF_ENDPOINT']} 下载",
+              flush=True)
+    return repo, False
 
 
 def model_disk_usage(repo: str = "Mapika/decider-2b") -> int:
@@ -319,12 +387,15 @@ class Judge:
             reason = download_block_reason(self.repo)
             if reason:
                 raise ModelNotDownloadedError(reason)
+            # Must settle before the import: huggingface_hub reads HF_ENDPOINT at
+            # import time, and transformers imports the hub.
+            load_from, offline = resolve_load_source(self.repo)
             from transformers import AutoModelForCausalLM, AutoTokenizer
 
             self.load_status = LOADING_STATUS
             try:
                 t = self.torch
-                self.tok = AutoTokenizer.from_pretrained(self.repo)
+                self.tok = AutoTokenizer.from_pretrained(load_from, local_files_only=offline)
                 # float16, not bfloat16: MPS takes the slow path for bf16 (limited op coverage) and
                 # it costs exactly 2x here — measured on this model, same prompt, three runs each:
                 # bf16 1352/1393/1467 ms vs fp16 734/745/827 ms. The judge is the single biggest
@@ -337,7 +408,7 @@ class Judge:
                 # steady-state inference is untouched. tqdm_class (this PR) reports download
                 # progress to the panel through load_status; the two kwargs are independent.
                 self.model = AutoModelForCausalLM.from_pretrained(
-                    self.repo, dtype=dtype, low_cpu_mem_usage=True,
+                    load_from, local_files_only=offline, dtype=dtype, low_cpu_mem_usage=True,
                     tqdm_class=_download_progress(
                         lambda text: setattr(self, "load_status", text))).to(self.device).eval()
                 self._letters = [self.tok.encode(c, add_special_tokens=False)[0]

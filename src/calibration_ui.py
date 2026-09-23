@@ -12,6 +12,16 @@ from perception import find_wechat_window, capture_image, capture_window, read_c
 from settings_config import read_document, write_settings
 import userconfig
 
+# The most common miss in real use was framing a single bubble instead of the whole
+# message flow, and clicking 确认并启用 without knowing the preview gate unlocks it.
+# Keep both facts in the texts the user actually reads while framing.
+INSTRUCTIONS = {
+    'messages': '消息区：一个框罩住整个消息流（双方头像与气泡都在内）；'
+                '排除左侧列表、标题、公告和输入区。对方/我自动判定。',
+    'input': '输入区：框选完整文字编辑区，排除底部工具栏和发送按钮。',
+}
+STATUS_FLOW = '① 框绿区（整个消息流）→ ② 框蓝区（输入区）→ ③ 预览识别 → ④ 通过后「确认并启用」点亮。'
+
 
 class SelectionView(A.NSView):
     def isFlipped(self): return True
@@ -84,7 +94,9 @@ class SelectionView(A.NSView):
 
 class CalibrationController(NSObject):
     @objc.python_method
-    def build(self, callback, saved='', image=None, win=None, saved_input=''):
+    # 纯原生窗口装配：依赖真微信窗口/截图权限，离线回归只测文案常量与
+    # 交互逻辑（见 tests/test_calibration_ui_copy.py），装配体本身不测。
+    def build(self, callback, saved='', image=None, win=None, saved_input=''):  # pragma: no cover
         self.mode = 'messages'
         self.regions = {'messages': None, 'input': None}
         self.callback=callback; self.busy=False; self.preview=None; self.closed=False
@@ -136,7 +148,7 @@ class CalibrationController(NSObject):
         self.selector.setTarget_(self);self.selector.setAction_('regionChanged:')
         self.selector.setAccessibilityLabel_('选择当前要调整的区域')
         view.addSubview_(self.selector)
-        self.instruction=ui_style.make_label('消息区：包含双方头像与气泡，排除列表、标题、公告和输入区。',
+        self.instruction=ui_style.make_label(INSTRUCTIONS['messages'],
             24,height-112,width-48,20,12,palette['muted'])
         view.addSubview_(self.instruction)
         card=ui_style.make_surface(12,surface['surface'],surface['edge'])
@@ -156,7 +168,7 @@ class CalibrationController(NSObject):
         notice=ui_style.make_surface(10,palette['amber'].colorWithAlphaComponent_(.10),
                                     palette['amber'].colorWithAlphaComponent_(.18))
         notice.setFrame_(NSMakeRect(24,64,width-48,42));view.addSubview_(notice)
-        self.status=ui_style.make_label('拖动框选后预览；调整窗口、分栏或输入区后请重新校准。',
+        self.status=ui_style.make_label(STATUS_FLOW,
             36,74,width-72,22,12,palette['accent'],bold=True)
         view.addSubview_(self.status)
         hint='两区一起保存 · 不发送消息、不清空草稿'
@@ -167,6 +179,8 @@ class CalibrationController(NSObject):
             ui_style.style_button(button,font_size=12,primary=action=='save:')
             view.addSubview_(button)
             if action=='save:':self.save_button=button;button.setEnabled_(False);button.setKeyEquivalent_('\r')
+            button.setToolTip_('「预览识别」通过后才会启用；两区一起保存'
+                               if action=='save:' else None)
             if action=='preview:':
                 self.preview_button=button
 
@@ -182,15 +196,18 @@ class CalibrationController(NSObject):
         self.regions[self.mode]=self.canvas.selection
         self.mode='messages' if self.selector.selectedSegment()==0 else 'input'
         self.canvas.selection=self.regions[self.mode]
-        self.instruction.setStringValue_(
-            '消息区：包含双方头像与气泡，排除列表、标题、公告和输入区。' if self.mode=='messages'
-            else '输入区：框选完整文字编辑区，排除底部工具栏和发送按钮。')
+        self.instruction.setStringValue_(INSTRUCTIONS[self.mode])
         self.canvas.setNeedsDisplay_(True)
 
     @objc.python_method
     def invalidate(self):
         self.preview=None;self.canvas.messages=[];self.save_button.setEnabled_(False)
-        self.status.setStringValue_('选区已调整，请预览识别；可拖动四条边微调。')
+        regions=dict(self.regions); regions[self.mode]=self.canvas.selection
+        if all(regions.values()):
+            self.status.setStringValue_('选区已调整——重新「预览识别」，通过后「确认并启用」才会点亮。')
+        else:
+            missing='输入区（蓝框）' if not regions['input'] else '消息区（绿框）'
+            self.status.setStringValue_(f'还差{missing}；两个区都框好后先「预览识别」。')
 
     @objc.python_method
     def selection(self):
