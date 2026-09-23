@@ -173,5 +173,69 @@ class WeChatWindowIdentityTests(unittest.TestCase):
             self.assertEqual(find_with([group, private], previous_wid=2).wid, 3)
 
 
+class _FakeAX:
+    """A stub ApplicationServices module: enough AX surface for the helper.
+
+    The helper imports ApplicationServices inside the call, so patching sys.modules
+    keeps these tests hermetic — no accessibility query, no real pid.
+    """
+
+    def __init__(self, focus_err=0, attr_map=None, value_ok=True):
+        self.kAXFocusedWindowAttribute = 'focused'
+        self.kAXPositionAttribute = 'position'
+        self.kAXSizeAttribute = 'size'
+        self.kAXValueCGPointType = 'point-type'
+        self.kAXValueCGSizeType = 'size-type'
+        self.focus_err = focus_err
+        self.attr_map = attr_map or {}
+        self.value_ok = value_ok
+
+    def AXUIElementCreateApplication(self, pid):
+        return ('app', pid)
+
+    def AXUIElementCopyAttributeValue(self, element, name, _None):
+        if name == self.kAXFocusedWindowAttribute:
+            err = self.focus_err
+            return err, None if err else ('window', 1)
+        return 0, self.attr_map.get(name)
+
+    def AXValueGetValue(self, raw, value_type, _None):
+        if not self.value_ok:
+            return False, None
+        if value_type == self.kAXValueCGPointType:
+            x, y = raw
+            return True, SimpleNamespace(x=x, y=y)
+        w, h = raw
+        return True, SimpleNamespace(width=w, height=h)
+
+
+def with_fake_ax(fake):
+    return patch.dict(sys.modules, {'ApplicationServices': fake})
+
+
+class AXFocusedFrameTests(unittest.TestCase):
+    def test_reads_focused_window_frame(self):
+        fake = _FakeAX(attr_map={
+            'position': (100.0, 50.0), 'size': (550.0, 719.0)})
+        with with_fake_ax(fake):
+            self.assertEqual(perception._ax_focused_frame(517),
+                             (100.0, 50.0, 550.0, 719.0))
+
+    def test_unanswered_focus_query_returns_none(self):
+        # 微信在后台时实测 -25212；任何非零错误码都回退
+        with with_fake_ax(_FakeAX(focus_err=-25212)):
+            self.assertIsNone(perception._ax_focused_frame(517))
+
+    def test_missing_position_or_size_returns_none(self):
+        with with_fake_ax(_FakeAX(attr_map={'position': (1.0, 2.0)})):
+            self.assertIsNone(perception._ax_focused_frame(517))
+
+    def test_unreadable_value_returns_none(self):
+        fake = _FakeAX(attr_map={'position': (1.0, 2.0), 'size': (3.0, 4.0)},
+                       value_ok=False)
+        with with_fake_ax(fake):
+            self.assertIsNone(perception._ax_focused_frame(517))
+
+
 if __name__ == '__main__':
     unittest.main()
