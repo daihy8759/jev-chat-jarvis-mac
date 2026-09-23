@@ -1833,6 +1833,7 @@ class HudController(NSObject):
                 self._input_target = dict(box=None,rect=None,window=dict(res['window']),
                     visual_rect=rect,manual_region=editor,signature_rect=signature_rect,
                     chat_signature=chat_signature(res['window'],signature_rect),
+                    app=app.key,   # 填入前复核：手动校准目标同样必须带归属标记（#105）
                     reason="手动校准输入区")
             self._input_window = dict(res["window"])
             self._input_next = float("inf")

@@ -174,5 +174,35 @@ class CalibrationHudTests(unittest.TestCase):
         self.assertEqual([t for t, side, _ in (self.h._observed_messages or [])], ['你好'])
         self.assertNotIn('图片内文字', self.h._active_context or '')
 
+    def test_manual_target_carries_app_stamp_and_fill_reaches_text(self):
+        # #105: the fill guard rejects any target whose `app` stamp mismatches the
+        # foreground adapter; the manual-calibration branch must stamp its target
+        # like the AX path does, or every fill reports「输入目标属于另一应用」.
+        from unittest.mock import Mock
+        self.h._wechat_frontmost = True
+        self.h._input_window = {'wid': 1}
+        self.h._input_next = float('inf')
+        self.h._input_calibration = Mock(screen_rect=Mock(return_value=(0, 400, 600, 100)))
+        self.h._input_calibration_wid = 1
+        self.h._calibration = Mock(screen_rect=Mock(return_value=(0, 380, 600, 120)))
+        self.h._calibration_wid = 1
+        self.scope['read_conversation'].return_value = {
+            'ok': True, 'unchanged': False, 'window': {'wid': 1, 'x': 0, 'y': 0, 'w': 600, 'h': 400},
+            'chat_title': '聊天', 'messages': [], 'manual_calibration': True}
+
+        with patch('visual_fill.chat_signature', return_value=b'sig'):
+            self.h._work_inner()
+
+        target = self.h._input_target
+        self.assertEqual(target['app'], 'wechat')
+        self.assertEqual(target['reason'], '手动校准输入区')
+
+        # End to end: a fill click with this target reaches the adapter, not the guard.
+        self.h.cand_texts = ['回复']
+        sender = Mock()
+        sender.tag.return_value = 0
+        self.h.fillCandidate_(sender)
+        self.scope['FAKE_APP'].fill_text.assert_called_once_with('回复', target=target)
+
 
 if __name__=='__main__':unittest.main()
