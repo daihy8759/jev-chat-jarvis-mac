@@ -54,13 +54,40 @@ class CaptureRecoveryTests(unittest.TestCase):
             return True
 
         with patch.object(perception, "capture_window", side_effect=fake_capture) as subprocess_capture, \
+             patch.object(perception, "_window_point_size", return_value=None), \
              patch.object(perception.Quartz, "CGImageSourceCreateWithData", return_value=object()), \
-             patch.object(perception.Quartz, "CGImageSourceCreateImageAtIndex", return_value=object()), \
-             patch.object(perception.Quartz, "CGImageCreateCopy", return_value=image):
+             patch.object(perception.Quartz, "CGImageSourceCreateImageAtIndex", return_value=image):
             result = perception.capture_image(123)
 
         self.assertIs(result, image)
         subprocess_capture.assert_called_once()
+
+    def test_capture_image_resamples_retina_backing_to_point_size(self):
+        with tempfile.TemporaryDirectory() as td:
+            source_png = Path(td) / "retina.png"
+            color_space = perception.Quartz.CGColorSpaceCreateDeviceRGB()
+            ctx = perception.Quartz.CGBitmapContextCreate(
+                None, 1600, 1200, 8, 1600 * 4, color_space,
+                perception.Quartz.kCGImageAlphaPremultipliedLast)
+            source_image = perception.Quartz.CGBitmapContextCreateImage(ctx)
+            from Foundation import NSURL
+            dest = perception.Quartz.CGImageDestinationCreateWithURL(
+                NSURL.fileURLWithPath_(str(source_png)), "public.png", 1, None)
+            perception.Quartz.CGImageDestinationAddImage(dest, source_image, None)
+            self.assertTrue(perception.Quartz.CGImageDestinationFinalize(dest))
+
+            def fake_capture(_wid, output):
+                shutil.copyfile(source_png, output)
+                return True
+
+            # 1600x1200 capture of an 800x600-point window: a 2x Retina backing
+            with patch.object(perception, "capture_window", side_effect=fake_capture), \
+                 patch.object(perception, "_window_point_size", return_value=800):
+                image = perception.capture_image(123)
+
+        self.assertIsNotNone(image)
+        self.assertEqual(perception.Quartz.CGImageGetWidth(image), 800)
+        self.assertEqual(perception.Quartz.CGImageGetHeight(image), 600)
 
     def test_read_conversation_uses_subprocess_capture_in_production(self):
         win = perception.WindowInfo(wid=123, pid=1, title="微信",
@@ -75,8 +102,9 @@ class CaptureRecoveryTests(unittest.TestCase):
              patch.object(perception, "capture_window", side_effect=fake_capture) as subprocess_capture, \
              patch("input_region.input_outline", return_value=(.32, .60, .65, .39)), \
              patch.object(perception.Quartz, "CGImageSourceCreateWithData", return_value=object()), \
-             patch.object(perception.Quartz, "CGImageSourceCreateImageAtIndex", return_value=object()), \
-             patch.object(perception.Quartz, "CGImageCreateCopy", return_value=image), \
+             patch.object(perception.Quartz, "CGImageSourceCreateImageAtIndex", return_value=image), \
+             patch.object(perception.Quartz, "CGImageGetWidth", return_value=800), \
+             patch.object(perception.Quartz, "CGImageGetHeight", return_value=600), \
              patch.object(perception, "_fingerprint", return_value=b"new"), \
              patch.object(perception, "ocr_image", return_value=[]):
             result = perception.read_conversation()
@@ -104,6 +132,21 @@ class CaptureRecoveryTests(unittest.TestCase):
                     os.environ["PATH"] = old_path
             self.assertFalse(result)
             self.assertLess(elapsed, 0.25)
+
+    def test_screencapture_missing_returns_failure(self):
+        # An empty PATH means subprocess.run cannot even launch screencapture
+        # (FileNotFoundError): that must degrade to a failed capture, not raise.
+        with tempfile.TemporaryDirectory() as td:
+            old_path = os.environ.get("PATH")
+            os.environ["PATH"] = td
+            try:
+                result = perception.capture_window(123, Path(td) / "out.png")
+            finally:
+                if old_path is None:
+                    os.environ.pop("PATH", None)
+                else:
+                    os.environ["PATH"] = old_path
+        self.assertFalse(result)
 
 
 if __name__ == "__main__":

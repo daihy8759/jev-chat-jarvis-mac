@@ -63,6 +63,13 @@ def frontmost(name, bundle=""):
 
 
 class WeChatWindowIdentityTests(unittest.TestCase):
+    def setUp(self):
+        # keep every window-list test hermetic: no real AX query against a live pid.
+        # AX-focused tests below re-patch this with the frame they simulate.
+        ax = patch.object(perception, '_ax_focused_frame', return_value=None)
+        ax.start()
+        self.addCleanup(ax.stop)
+
     def test_weixin_alias_owner_is_accepted(self):
         """The #50 case: a 4.x build reporting 'Weixin' must still be found.
 
@@ -125,6 +132,109 @@ class WeChatWindowIdentityTests(unittest.TestCase):
         self.assertTrue(frontmost('WeChat', bundle='com.tencent.xinWeChat'))
         self.assertTrue(frontmost('Some Locale Name', bundle='com.tencent.xinWeChat'))
         self.assertFalse(frontmost('微信读书', bundle='com.tencent.weread'))
+
+    def test_default_detached_chat_window_is_eligible(self):
+        """#91: WeChat 4.x's default detached chat window is 550pt wide; the old
+        600pt gate excluded every one of them from the candidate set entirely."""
+        self.assertIsNotNone(find_with([window('WeChat', '张三', 550, 719, wid=3)]))
+
+    def test_ax_focused_detached_window_beats_larger_main(self):
+        """#91: the window the user is reading (AX focus) outranks the bigger main
+        window and the area sort — that is the whole point of the focused match."""
+        detached = window('WeChat', '张三', 550, 719, wid=2)
+        main = window('微信', '微信', 959, 769, wid=1)
+        focused = (0.0, 0.0, 550.0, 719.0)   # the helper's windows sit at the origin
+        with patch.object(perception, '_ax_focused_frame', return_value=focused):
+            self.assertEqual(find_with([main, detached]).wid, 2)
+
+    def test_ax_failure_keeps_main_window_priority(self):
+        """AX reads fail routinely (permission, timing); without a usable focus the
+        #50 heuristic — main window over larger detached — rules unchanged."""
+        detached = window('WeChat', '微信 (窗口)', 947, 679, wid=2)
+        main = window('微信', '微信', 754, 593, wid=1)
+        with patch.object(perception, '_ax_focused_frame', return_value=None):
+            self.assertEqual(find_with([detached, main]).wid, 1)
+
+    def test_ax_focus_on_non_candidate_surface_falls_back(self):
+        """A focused WeChat surface that is not a chat window (popup, mini program)
+        matches no candidate, so selection falls back to the #50 heuristic."""
+        main = window('微信', '微信', 959, 769, wid=1)
+        with patch.object(perception, '_ax_focused_frame',
+                          return_value=(0.0, 0.0, 360.0, 288.0)):
+            self.assertEqual(find_with([main]).wid, 1)
+
+    def test_ax_focus_beats_previous_wid_stickiness(self):
+        """Focus is fresh every call: switching to another chat's window must move
+        the read target immediately, not stay stuck on the previously chosen one."""
+        group = window('WeChat', '白金群', 700, 640, wid=2)
+        private = window('WeChat', '李四', 550, 719, wid=3)
+        focused = (0.0, 0.0, 550.0, 719.0)   # matches the private window's frame only
+        with patch.object(perception, '_ax_focused_frame', return_value=focused):
+            self.assertEqual(find_with([group, private], previous_wid=2).wid, 3)
+
+
+class _FakeAX:
+    """A stub ApplicationServices module: enough AX surface for the helper.
+
+    The helper imports ApplicationServices inside the call, so patching sys.modules
+    keeps these tests hermetic — no accessibility query, no real pid.
+    """
+
+    def __init__(self, focus_err=0, attr_map=None, value_ok=True):
+        self.kAXFocusedWindowAttribute = 'focused'
+        self.kAXPositionAttribute = 'position'
+        self.kAXSizeAttribute = 'size'
+        self.kAXValueCGPointType = 'point-type'
+        self.kAXValueCGSizeType = 'size-type'
+        self.focus_err = focus_err
+        self.attr_map = attr_map or {}
+        self.value_ok = value_ok
+
+    def AXUIElementCreateApplication(self, pid):
+        return ('app', pid)
+
+    def AXUIElementCopyAttributeValue(self, element, name, _None):
+        if name == self.kAXFocusedWindowAttribute:
+            err = self.focus_err
+            return err, None if err else ('window', 1)
+        return 0, self.attr_map.get(name)
+
+    def AXValueGetValue(self, raw, value_type, _None):
+        if not self.value_ok:
+            return False, None
+        if value_type == self.kAXValueCGPointType:
+            x, y = raw
+            return True, SimpleNamespace(x=x, y=y)
+        w, h = raw
+        return True, SimpleNamespace(width=w, height=h)
+
+
+def with_fake_ax(fake):
+    return patch.dict(sys.modules, {'ApplicationServices': fake})
+
+
+class AXFocusedFrameTests(unittest.TestCase):
+    def test_reads_focused_window_frame(self):
+        fake = _FakeAX(attr_map={
+            'position': (100.0, 50.0), 'size': (550.0, 719.0)})
+        with with_fake_ax(fake):
+            self.assertEqual(perception._ax_focused_frame(517),
+                             (100.0, 50.0, 550.0, 719.0))
+
+    def test_unanswered_focus_query_returns_none(self):
+        # 微信在后台时实测 -25212；任何非零错误码都回退
+        with with_fake_ax(_FakeAX(focus_err=-25212)):
+            self.assertIsNone(perception._ax_focused_frame(517))
+
+    def test_missing_position_or_size_returns_none(self):
+        with with_fake_ax(_FakeAX(attr_map={'position': (1.0, 2.0)})):
+            self.assertIsNone(perception._ax_focused_frame(517))
+
+    def test_unreadable_value_returns_none(self):
+        fake = _FakeAX(attr_map={'position': (1.0, 2.0), 'size': (3.0, 4.0)},
+                       value_ok=False)
+        with with_fake_ax(fake):
+            self.assertIsNone(perception._ax_focused_frame(517))
 
 
 if __name__ == '__main__':

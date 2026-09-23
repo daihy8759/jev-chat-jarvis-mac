@@ -11,6 +11,10 @@
 #   allow-unsafe-pr-checkout——workflow_run 是可信上下文，checkout 外来 head
 #   代码就是 pwn request。PR 内容对 agent 仍是不可信输入（prompt 注入面），
 #   env 只放权限受限的 github.token。
+# - prompt 契约（官方硬校验）：with.prompt 必须**原样**写 `${{ inputs.prompt }}`，
+#   不能拼进 env 再传——action 要从事件/dispatch 载荷自己恢复 PR 上下文，自动路径
+#   （workflow_run）传组合 prompt 会 15s 内硬失败。评审指引放 Pullfrog 控制台的
+#   Standing instructions（输出锁中文也在那里配），不放在本文件。
 # - 触发器按 workflow 名字关联 ci.yml（workflows: [CI]），那边改 name 这里要同步。
 name: Pullfrog
 run-name: ${{ inputs.name || github.workflow }}
@@ -28,9 +32,11 @@ on:
     workflows: [CI]
     types: [completed]
 
-# CI 连续重跑时取消同一目标的旧评审
+# 自动评审按触发的 head_sha 去重（CI 重跑时取消过期的旧评审）；手动 dispatch
+# 用 run_id 独占一组——不能用 github.ref 兜底，否则所有 dispatch 都落在 master
+# 同一组里，后发的评审会把在跑的直接取消（实测：连续 Review #96/#97/#98 互杀）
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_sha || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_sha || github.run_id }}
   cancel-in-progress: true
 
 permissions:
@@ -112,36 +118,14 @@ jobs:
           git fetch -q --depth=1 origin "$REF"
           git checkout -q FETCH_HEAD
 
-      - name: 组 prompt
-        if: github.event_name == 'workflow_dispatch' || steps.pr.outputs.number != ''
-        env:
-          USER_PROMPT: ${{ inputs.prompt }}
-          PR_NUMBER: ${{ steps.pr.outputs.number }}
-        run: |
-          if [ -n "$USER_PROMPT" ]; then
-            P="$USER_PROMPT"
-          elif [ -n "$PR_NUMBER" ]; then
-            P="评审本 PR（#${PR_NUMBER}）。步骤：
-          1) 运行 gh pr diff ${PR_NUMBER} 查看全部改动（已提供 GH_TOKEN，仓库即当前仓库）；
-          2) 结合仓库根目录的 AGENTS.md 与 CONTRIBUTING.md 审查：纯只读原则、轮询与线程结构约定、判断层 prompt 措辞红线、测试覆盖是否达标、有无安全隐患；
-          3) 按「必须修 / 建议修 / 可以不修」分级输出意见，指到具体文件与行；
-          4) 把评审结论作为该 PR 的评论提交。
-          只评审：不改代码、不 push、不合并。"
-          else
-            echo "::error::workflow_dispatch 需要填 prompt（或用于自动评审触发）"
-            exit 1
-          fi
-          {
-            echo "PROMPT<<PROMPT_EOF"
-            echo "$P"
-            echo "PROMPT_EOF"
-          } >> "$GITHUB_ENV"
-
       - name: Run agent
         if: github.event_name == 'workflow_dispatch' || steps.pr.outputs.number != ''
         uses: pullfrog/pullfrog@v0
+        # 契约：必须原样 ${{ inputs.prompt }}，评审指引在 Pullfrog 控制台的
+        # Standing instructions 里（见文件头）。workflow_dispatch 不填 prompt
+        # 且非 PR 触发的场景由上方 step if 挡住，走不到这里。
         with:
-          prompt: ${{ env.PROMPT }}
+          prompt: ${{ inputs.prompt }}
         env:
           GH_TOKEN: ${{ github.token }}
           # 不放 provider key：凭据由 Pullfrog 服务端持有（见文件头「凭据模型」）
