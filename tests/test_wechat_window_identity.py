@@ -63,6 +63,13 @@ def frontmost(name, bundle=""):
 
 
 class WeChatWindowIdentityTests(unittest.TestCase):
+    def setUp(self):
+        # keep every window-list test hermetic: no real AX query against a live pid.
+        # AX-focused tests below re-patch this with the frame they simulate.
+        ax = patch.object(perception, '_ax_focused_frame', return_value=None)
+        ax.start()
+        self.addCleanup(ax.stop)
+
     def test_weixin_alias_owner_is_accepted(self):
         """The #50 case: a 4.x build reporting 'Weixin' must still be found.
 
@@ -125,6 +132,45 @@ class WeChatWindowIdentityTests(unittest.TestCase):
         self.assertTrue(frontmost('WeChat', bundle='com.tencent.xinWeChat'))
         self.assertTrue(frontmost('Some Locale Name', bundle='com.tencent.xinWeChat'))
         self.assertFalse(frontmost('微信读书', bundle='com.tencent.weread'))
+
+    def test_default_detached_chat_window_is_eligible(self):
+        """#91: WeChat 4.x's default detached chat window is 550pt wide; the old
+        600pt gate excluded every one of them from the candidate set entirely."""
+        self.assertIsNotNone(find_with([window('WeChat', '张三', 550, 719, wid=3)]))
+
+    def test_ax_focused_detached_window_beats_larger_main(self):
+        """#91: the window the user is reading (AX focus) outranks the bigger main
+        window and the area sort — that is the whole point of the focused match."""
+        detached = window('WeChat', '张三', 550, 719, wid=2)
+        main = window('微信', '微信', 959, 769, wid=1)
+        focused = (0.0, 0.0, 550.0, 719.0)   # the helper's windows sit at the origin
+        with patch.object(perception, '_ax_focused_frame', return_value=focused):
+            self.assertEqual(find_with([main, detached]).wid, 2)
+
+    def test_ax_failure_keeps_main_window_priority(self):
+        """AX reads fail routinely (permission, timing); without a usable focus the
+        #50 heuristic — main window over larger detached — rules unchanged."""
+        detached = window('WeChat', '微信 (窗口)', 947, 679, wid=2)
+        main = window('微信', '微信', 754, 593, wid=1)
+        with patch.object(perception, '_ax_focused_frame', return_value=None):
+            self.assertEqual(find_with([detached, main]).wid, 1)
+
+    def test_ax_focus_on_non_candidate_surface_falls_back(self):
+        """A focused WeChat surface that is not a chat window (popup, mini program)
+        matches no candidate, so selection falls back to the #50 heuristic."""
+        main = window('微信', '微信', 959, 769, wid=1)
+        with patch.object(perception, '_ax_focused_frame',
+                          return_value=(0.0, 0.0, 360.0, 288.0)):
+            self.assertEqual(find_with([main]).wid, 1)
+
+    def test_ax_focus_beats_previous_wid_stickiness(self):
+        """Focus is fresh every call: switching to another chat's window must move
+        the read target immediately, not stay stuck on the previously chosen one."""
+        group = window('WeChat', '白金群', 700, 640, wid=2)
+        private = window('WeChat', '李四', 550, 719, wid=3)
+        focused = (0.0, 0.0, 550.0, 719.0)   # matches the private window's frame only
+        with patch.object(perception, '_ax_focused_frame', return_value=focused):
+            self.assertEqual(find_with([group, private], previous_wid=2).wid, 3)
 
 
 if __name__ == '__main__':

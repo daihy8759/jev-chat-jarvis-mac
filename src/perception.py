@@ -142,8 +142,44 @@ def frontmost_app_is_wechat() -> bool | None:
         return None
 
 
+def _ax_focused_frame(pid: int) -> tuple[float, float, float, float] | None:
+    """(x, y, w, h) of the app's AX-focused window, or None when it cannot be read.
+
+    The focused window is the conversation the user is actually reading — the one
+    thing neither the main-window priority nor the area sort can see once chats are
+    torn off into detached windows (#91). Same shape as ``fill._ax_rect``: AX and CG
+    agree on top-left point coordinates, so the frames compare directly. AX reads
+    fail routinely (permission, timing, odd surfaces), so every failure degrades to
+    None and the caller falls back to the window-list heuristic unchanged.
+    """
+    try:
+        import ApplicationServices as A
+
+        root = A.AXUIElementCreateApplication(int(pid))
+        err, focused = A.AXUIElementCopyAttributeValue(
+            root, A.kAXFocusedWindowAttribute, None)
+        if err != 0 or focused is None:
+            return None
+
+        def attr(element, name):
+            err, value = A.AXUIElementCopyAttributeValue(element, name, None)
+            return value if err == 0 else None
+
+        raw_pos = attr(focused, A.kAXPositionAttribute)
+        raw_size = attr(focused, A.kAXSizeAttribute)
+        if raw_pos is None or raw_size is None:
+            return None
+        ok_pos, point = A.AXValueGetValue(raw_pos, A.kAXValueCGPointType, None)
+        ok_size, size = A.AXValueGetValue(raw_size, A.kAXValueCGSizeType, None)
+        if not (ok_pos and ok_size):
+            return None
+        return (float(point.x), float(point.y), float(size.width), float(size.height))
+    except Exception:
+        return None
+
+
 def find_wechat_window(previous_wid: int | None = None) -> WindowInfo | None:
-    """Prefer the main chat window over larger detached WeChat windows.
+    """Read the window the user is chatting in.
 
     Window ownership is matched exactly against WECHAT_APP_NAMES. It used to be a
     substring test, which missed the ``Weixin`` alias — a 4.x build reporting that name
@@ -154,10 +190,19 @@ def find_wechat_window(previous_wid: int | None = None) -> WindowInfo | None:
     This filters on the owning *app*, not on the window, so WeChat's detached
     mini-program and web windows still carry owner ``WeChat`` and stay eligible — that
     is what keeps the main-window-absent fallback working.
+
+    WeChat 4.x users chat in detached windows (the default is 550pt wide, below the
+    old 600pt gate — #91), so the largest window is not necessarily the one on
+    screen. The app's AX-focused window is: when its frame matches an eligible
+    candidate (±2pt), that window wins outright. Only an unreadable or non-chat
+    focus falls through to the #50 heuristic — main-window priority, then area,
+    then the previous-wid stickiness that keeps equally-sized windows from
+    re-picking each tick.
     """
     opts = Quartz.kCGWindowListOptionAll | Quartz.kCGWindowListExcludeDesktopElements
     wins = Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID)
     best: WindowInfo | None = None
+    eligibles: list[WindowInfo] = []
     for w in wins:
         owner = w.get("kCGWindowOwnerName") or ""
         if owner not in WECHAT_APP_NAMES:
@@ -171,15 +216,28 @@ def find_wechat_window(previous_wid: int | None = None) -> WindowInfo | None:
             x=float(b.get("X", 0)), y=float(b.get("Y", 0)),
             w=float(b.get("Width", 0)), h=float(b.get("Height", 0)),
         )
-        # main window: has a title, layer 0-ish, big, roughly window-shaped
-        if not title or wi.w < 600 or wi.h < 400:
+        # a chat window: titled and roughly window-shaped. 500pt admits WeChat 4.x's
+        # default detached chat window; the noise surfaces sampled live (tooltips,
+        # popups) are ≤360pt wide or under 400pt tall.
+        if not title or wi.w < 500 or wi.h < 400:
             continue
+        eligibles.append(wi)
         # only a titled, window-sized window can be the main chat window. The main window
         # is titled with the app's own display name, so this priority check reads the same
         # list rather than keeping a second copy that drifts out of step (#50).
         if best is None or (wi.title in WECHAT_APP_NAMES, wi.w * wi.h, wi.wid) > (
                 best.title in WECHAT_APP_NAMES, best.w * best.h, best.wid):
             best = wi
+
+    # The user's window beats every heuristic: a focused frame match is exactly the
+    # conversation on screen, and it is fresh each call — no stickiness needed.
+    if eligibles:
+        focused = _ax_focused_frame(eligibles[0].pid)
+        if focused is not None:
+            for wi in eligibles:
+                if all(abs(a - b) <= 2 for a, b in zip(
+                        (wi.x, wi.y, wi.w, wi.h), focused)):
+                    return wi
 
     # stick with the window we already chose: WeChat 4.x keeps several equally-sized
     # windows around, and re-picking each tick let the target jump between them.
@@ -195,7 +253,7 @@ def find_wechat_window(previous_wid: int | None = None) -> WindowInfo | None:
             b = dict(w.get("kCGWindowBounds") or {})
             pw = float(b.get("Width", 0))
             ph = float(b.get("Height", 0))
-            if (title and pw >= 600 and ph >= 400
+            if (title and pw >= 500 and ph >= 400
                     and (title in WECHAT_APP_NAMES) == (best.title in WECHAT_APP_NAMES)):
                 return WindowInfo(wid=previous_wid, pid=int(w.get("kCGWindowOwnerPID") or 0),
                                   title=title, x=float(b.get("X", 0)), y=float(b.get("Y", 0)),

@@ -1798,6 +1798,12 @@ class HudController(NSObject):
         else:
             self._empty_frame_since = None
             self._last_full = res
+            # a picked-over window list was invisible in the logs and cost a whole
+            # misdiagnosis (#91): say which window the reads moved to, geometry only
+            if res["window"].get("wid") != getattr(self, "_read_wid", None):
+                self._read_wid = res["window"].get("wid")
+                _log(f"读屏窗口切换 wid={res['window'].get('wid')} "
+                     f"{res['window'].get('w', 0):.0f}x{res['window'].get('h', 0):.0f}")
             self._push("applyChat:", res.get("chat_title") or "")
 
         res = dict(res, window=live_window, input_rect=live_input_rect)
