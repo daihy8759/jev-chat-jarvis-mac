@@ -94,7 +94,9 @@ class SelectionView(A.NSView):
 
 class CalibrationController(NSObject):
     @objc.python_method
-    def build(self, callback, saved='', image=None, win=None, saved_input=''):
+    # 纯原生窗口装配：依赖真微信窗口/截图权限，离线回归只测文案常量与
+    # 交互逻辑（见 tests/test_calibration_ui_copy.py），装配体本身不测。
+    def build(self, callback, saved='', image=None, win=None, saved_input=''):  # pragma: no cover
         self.mode = 'messages'
         self.regions = {'messages': None, 'input': None}
         self.callback=callback; self.busy=False; self.preview=None; self.closed=False
