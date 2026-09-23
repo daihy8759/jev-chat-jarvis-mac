@@ -1,0 +1,50 @@
+# Issue 自动 triage：每小时巡检 open issue，按两个模板补标题前缀/正文小节、
+# 按 CONTRIBUTING「Issue 标签约定」补类型与 area/* 标签。规则与幂等设计见
+# ci/issue_triage.py 顶部注释；贡献者侧的说明在 CONTRIBUTING.md「Issue 标签约定」。
+name: Issue Triage
+
+on:
+  schedule:
+    # 每小时 17 分，错开整点高峰。两个 GitHub 定时任务特性要有预期：
+    # ① 高峰期 schedule 可能延迟数分钟到半小时才跑，属正常现象；
+    # ② 仓库 60 天无活动后 GitHub 会自动停用 schedule（有邮件通知，网页上重新启用即可）。
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "试跑：只打印将执行的动作，不写任何 issue"
+        type: boolean
+        default: true
+
+# 定时与手动实跑可能重叠：同组排队、不取消进行中的 run，避免上一轮改到一半被砍
+concurrency:
+  group: issue-triage
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  triage:
+    name: Issue 格式修复与打标
+    # fork 仓库不跑（定时任务在 fork 上没有意义，还会烧额度）
+    if: github.repository == 'jev-chat/jev-chat-jarvis-mac'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # 唯一需要的写权限：改标题/正文、打标签、发评论（与 pullfrog.yml 一样最小化）
+      issues: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      # 脚本 stdlib-only，runner 自带 python3 直接跑，不需要 uv / 装依赖；
+      # 零自定义 secrets，凭据只用受限的 github.token
+      - name: 执行 triage
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python3 ci/issue_triage.py --dry-run
+          else
+            python3 ci/issue_triage.py
+          fi

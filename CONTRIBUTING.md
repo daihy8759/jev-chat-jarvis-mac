@@ -77,6 +77,8 @@ uv run --locked --with diff-cover diff-cover coverage.xml --compare-branch origi
 
 命令：`gh issue edit <n> --add-label "bug" --add-label "area/perception"`。
 
+机器人（github-actions[bot]）每小时自动巡检 open issue：缺类型/模块标签的按关键词规则补打，缺 `[Bug] `/`[Feature] ` 标题前缀或模板小节的自动补齐（逻辑见 `ci/issue_triage.py`，走 `.github/workflows/issue-triage.yml` 定时跑）。所有改动都可在 issue 编辑历史回溯，人工发现遗漏不用抢着补；拿不准的类型机器人会评论求助而不是瞎打。
+
 ## 有问题？
 
 - Bug / 功能建议 → [Issues](../../issues)，认领前先读上面的三步自检
