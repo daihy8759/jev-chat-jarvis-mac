@@ -12,11 +12,10 @@ gh issue view <n> --comments            # ② 已有别人的「认领」评论 
 gh pr list --state open --search "<n>"  # ③ 已有关联 open PR → 停手，换 issue
 ```
 
-三步都干净，再认领占坑（评论 + assignee，两个动作都要）：
+三步都干净，评论认领即可占坑——**首个评论「认领」的人由 CI 自动设为 assignee**（外部 fork 贡献者没有写权限、设不了 assignee，由仓库代劳；见 `.github/workflows/auto-assign-claim.yml`）：
 
 ```bash
 gh issue comment <n> --body "认领：<一句话说打算怎么修>"
-gh issue edit <n> --add-assignee @me
 ```
 
 - **弃坑规则**：认领后 7 天没有 open PR 视为自动释放，其他人可接手（接手前在原认领评论下回复一声）。

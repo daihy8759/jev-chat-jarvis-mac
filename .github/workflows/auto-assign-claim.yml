@@ -1,0 +1,47 @@
+# 认领自动 assign：issue 下第一个评论「认领…」的人自动成为 assignee。
+#
+# 背景：外部 fork 贡献者没有仓库写权限，认领协议里「自己设 assignee」那步
+# 一直走不通（gh issue edit --add-assignee 对无权限者报 not found）；
+# 改由 CI 用仓库 token（issues: write）代设，首个认领者优先——
+# 已有 assignee 的 issue 不再改动。
+name: Claim assign
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+# 同一 issue 的认领评论串行处理，保证「第一个」语义（后到的排队检查后发现已有 assignee 即退出）
+concurrency:
+  group: claim-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  assign:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    # 只看 issue（PR 的评论不算）；只认「认领」开头的评论（与 CONTRIBUTING 认领协议一致）
+    if: >-
+      !github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '认领')
+    steps:
+      - name: 首个认领者自动 assign
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+          CLAIMER: ${{ github.event.comment.user.login }}
+        run: |
+          N=$(gh issue view "$ISSUE" --json assignees --jq '(.assignees | length)')
+          if [ "$N" != "0" ]; then
+            echo "issue #$ISSUE 已有 assignee，跳过（首个认领者优先）"
+            exit 0
+          fi
+          if gh issue edit "$ISSUE" --add-assignee "$CLAIMER"; then
+            echo "issue #$ISSUE 已自动 assign 给首个认领者 $CLAIMER"
+          else
+            # 罕见：评论者账号不可被 assign（与仓库无交互记录等）
+            echo "::warning::$CLAIMER 不可被 assign，请维护者手动处理"
+          fi
