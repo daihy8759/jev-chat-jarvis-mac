@@ -163,6 +163,25 @@ def ensure_download_endpoint(timeout_s: float = 2.5) -> str | None:
     return FALLBACK_ENDPOINT
 
 
+def resolve_load_source(repo: str = "Mapika/decider-2b") -> tuple[str, bool]:
+    """(load_from, offline) for from_pretrained, settling the endpoint first.
+
+    Cached: the local snapshot and zero network — loading by repo id would make
+    transformers phone home for a revision check first, and from a mainland network
+    that check is a silent timeout on EVERY launch, paid in warm-up seconds plus an
+    HF_TOKEN warning (#95). Uncached (first authorized download): the repo id through
+    the endpoint ensure_download_endpoint() settled, so the download does not hang
+    before it starts.
+    """
+    snapshot = cached_snapshot_dir(repo)
+    if snapshot is not None:
+        return snapshot, True
+    if ensure_download_endpoint():
+        print(f"[jev-jarvis] huggingface.co 不可达，改用镜像 {os.environ['HF_ENDPOINT']} 下载",
+              flush=True)
+    return repo, False
+
+
 def model_disk_usage(repo: str = "Mapika/decider-2b") -> int:
     """Bytes the cached model actually occupies on disk, 0 when absent.
 
@@ -368,26 +387,14 @@ class Judge:
             reason = download_block_reason(self.repo)
             if reason:
                 raise ModelNotDownloadedError(reason)
-            # Cached loads go straight from the local snapshot: passing the repo id
-            # would make from_pretrained phone home for a revision check first, and
-            # from a mainland network that check is a silent timeout on EVERY launch
-            # (#95) — the user pays it in warm-up seconds and an HF_TOKEN warning.
-            snapshot = cached_snapshot_dir(self.repo)
-            if snapshot is None:
-                # The first authorized download. Settle the endpoint (mirror fallback,
-                # #95) BEFORE the import below: huggingface_hub reads HF_ENDPOINT at
-                # import time.
-                endpoint = ensure_download_endpoint()
-                if endpoint:
-                    print(f"[jev-jarvis] huggingface.co 不可达，改用镜像 {endpoint} 下载",
-                          flush=True)
+            # Must settle before the import: huggingface_hub reads HF_ENDPOINT at
+            # import time, and transformers imports the hub.
+            load_from, offline = resolve_load_source(self.repo)
             from transformers import AutoModelForCausalLM, AutoTokenizer
 
             self.load_status = LOADING_STATUS
             try:
                 t = self.torch
-                load_from = snapshot or self.repo
-                offline = snapshot is not None
                 self.tok = AutoTokenizer.from_pretrained(load_from, local_files_only=offline)
                 # float16, not bfloat16: MPS takes the slow path for bf16 (limited op coverage) and
                 # it costs exactly 2x here — measured on this model, same prompt, three runs each:

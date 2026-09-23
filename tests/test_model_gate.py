@@ -110,6 +110,31 @@ class EndpointFallbackTests(unittest.TestCase):
         self.assertEqual(os.environ["HF_ENDPOINT"], judge.FALLBACK_ENDPOINT)
 
 
+class LoadSourceTests(unittest.TestCase):
+    """#95: _load 的加载源决策——已缓存走本地离线，未缓存先定端点。"""
+
+    def test_cached_snapshot_loads_offline_without_endpoint_probe(self):
+        with mock.patch.object(judge, "cached_snapshot_dir", return_value="/snap/x"), \
+             mock.patch.object(judge, "ensure_download_endpoint",
+                               side_effect=AssertionError) as ensure:
+            self.assertEqual(judge.resolve_load_source(), ("/snap/x", True))
+        ensure.assert_not_called()
+
+    def test_uncached_resolves_endpoint_then_repo(self):
+        with mock.patch.object(judge, "cached_snapshot_dir", return_value=None), \
+             mock.patch.object(judge, "ensure_download_endpoint",
+                               return_value=None) as ensure:
+            self.assertEqual(judge.resolve_load_source(), ("Mapika/decider-2b", False))
+        ensure.assert_called_once()
+
+    def test_uncached_mirror_switch_announces(self):
+        with mock.patch.object(judge, "cached_snapshot_dir", return_value=None), \
+             mock.patch.object(judge, "ensure_download_endpoint",
+                               return_value="https://hf-mirror.com"), \
+             mock.patch.dict(os.environ, {"HF_ENDPOINT": "https://hf-mirror.com"}):
+            self.assertEqual(judge.resolve_load_source(), ("Mapika/decider-2b", False))
+
+
 class DownloadGateTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
