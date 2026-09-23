@@ -646,8 +646,14 @@ def looks_like_sender_name(msg: Message, following: Message | None) -> bool:
 # ---------------------------------------------------------------------- public API
 
 
-def read_calibrated(image, calibration, window, max_messages=12):
-    """Explicit selected region. Never infer a fill target from a message selection."""
+def read_calibrated(image, calibration, window, max_messages=12, capture_ms=0.0):
+    """Explicit selected region. Never infer a fill target from a message selection.
+
+    capture_ms: time read_conversation already spent finding the window and capturing
+    before handing us the pixels. Timing is reported from the caller's t0, same
+    caliber as the plain path — without it this branch reported capture=0 and the
+    real capture cost vanished from the read log (#110).
+    """
     from calibrated_messages import extract, recover_numeric_bubbles
     t0 = time.perf_counter()
     x,y,w,h = calibration.rect()
@@ -666,8 +672,8 @@ def read_calibrated(image, calibration, window, max_messages=12):
             "chat_title": title, "n_blocks": len(blocks), "fingerprint": None,
             "layout": (window['wid'],window['w'],window['h'],calibration.serialize()),
             "input_rect": None, "manual_calibration": True,
-            "timing_ms": {"capture":0., "ocr":elapsed, "total":elapsed,
-                          "capture_path":"manual"}}
+            "timing_ms": {"capture":capture_ms, "ocr":elapsed,
+                          "total":capture_ms+elapsed, "capture_path":"manual"}}
 
 
 def read_conversation(max_messages: int = 12, previous_wid: int | None = None,
@@ -706,7 +712,9 @@ def read_conversation(max_messages: int = 12, previous_wid: int | None = None,
         if not calibration.matches(win):
             return {"ok": True, "unchanged": False, "messages": [], "window": window,
                     "calibration_error": "窗口尺寸已改变，请重新校准消息区域。"}
-        return read_calibrated(image, calibration, window, max_messages)
+        capture_ms = (time.perf_counter() - t0) * 1000
+        return read_calibrated(image, calibration, window, max_messages,
+                               capture_ms=capture_ms)
     from input_region import input_outline
     try:
         outline = input_outline(image) if image is not None else None

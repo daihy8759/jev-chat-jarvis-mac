@@ -6,6 +6,7 @@ No Cocoa, no screen read, no model calls; `block()` comes from tests/support_hud
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
@@ -62,6 +63,22 @@ class PerceptionTests(unittest.TestCase):
         self.assertEqual(messages[0].side, 'them')
         self.assertEqual(messages[0].sender, '小王')
         self.assertEqual(len(messages[0].lines), 2)
+
+    def test_calibrated_timing_carries_upstream_capture(self):
+        # #110: read_calibrated receives pixels the caller already paid for; its
+        # timing must carry that capture cost, not report 抓取 0ms in the read log.
+        from calibration import Calibration
+        import perception
+        cal = Calibration(600, 600, 120, 60, 450, 480)
+        win = {'wid': 1, 'w': 600, 'h': 600, 'x': 0, 'y': 0}
+        with patch('perception.ocr_image', return_value=[]), \
+                patch('calibrated_messages.recover_numeric_bubbles', return_value=[]), \
+                patch('calibrated_messages.extract', return_value=[]):
+            res = perception.read_calibrated(object(), cal, win, capture_ms=123.0)
+        t = res['timing_ms']
+        self.assertEqual(t['capture'], 123.0)
+        self.assertAlmostEqual(t['total'], 123.0 + t['ocr'], places=6)
+        self.assertEqual(t['capture_path'], 'manual')
 
 
 if __name__ == '__main__':
