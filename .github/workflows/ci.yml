@@ -32,8 +32,28 @@ jobs:
         with:
           fetch-depth: 0
 
+      # 纯文档改动（docs/、根目录 *.md、LICENSE、.gitignore）跳过测试但照常报绿——
+      # required check 永远有结果，分支保护和合并队列都不会因为「check 没出现」卡死。
+      # 不能用触发器级 paths 过滤：那会让 required check 根本不产生。
+      # 仅 pull_request 做判定；master push 与合并队列一律全量跑（合并结果求稳）。
+      - name: 是否纯文档改动
+        id: changes
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          FILES="$(git diff --name-only "origin/master...HEAD")"
+          echo "改动文件："; echo "${FILES:-（空，默认全量跑）}"
+          if [ -n "$FILES" ] && ! echo "$FILES" | grep -qvE '^(docs/|[^/]+\.(md|rst|txt)$|LICENSE|\.gitignore$)'; then
+            echo "纯文档改动 → 跳过测试，直接报绿"
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+          fi
+
       # 注：setup-uv 自 v8 起不再发布 @v8 这类 major tag，须 pin 完整版本号
       - name: Install uv
+        if: steps.changes.outputs.docs_only != 'true'
         uses: astral-sh/setup-uv@v10.1.0
         with:
           enable-cache: true
@@ -43,6 +63,7 @@ jobs:
       # 缓冲吸收平台抖动；覆盖率涨了就随同一个 PR 上调门槛文件，把增量焊死。
       # coverage/diff-cover 临时注入（uv --with），不动 pyproject.toml。
       - name: 离线回归（覆盖率统计 + 基线门禁）
+        if: steps.changes.outputs.docs_only != 'true'
         run: |
           set -o pipefail
           uv run --locked --with coverage coverage run --source=src -m unittest discover -s tests
@@ -55,7 +76,7 @@ jobs:
       # ——「只升不降」不靠 review 自觉。确需下调（如移除大模块）在 PR 里说明理由，
       # 维护者特批。基线文件在 origin/master 尚不存在时（首个引入 PR）视为 0 放行。
       - name: 基线棘轮（coverage-min 只许升，仅 PR）
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && steps.changes.outputs.docs_only != 'true'
         run: |
           LOCAL="$(tr -d '[:space:]' < ci/coverage-min.txt)"
           BASE="$(git show origin/master:ci/coverage-min.txt 2>/dev/null | tr -d '[:space:]')"
@@ -76,7 +97,7 @@ jobs:
       # 存量零追缴（存量由上面的全局基线管，这里只管增量）。master push 无增量语义，
       # 跳过；diff 里无 Python 改动时直接绿，纯 CI/文档 PR 不误伤。
       - name: 增量覆盖率门禁（改动行 ≥80%，仅 PR）
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && steps.changes.outputs.docs_only != 'true'
         # pipefail：门禁退出码不许被吞，红就是红
         run: |
           set -o pipefail
