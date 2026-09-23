@@ -1908,13 +1908,9 @@ class HudController(NSObject):
                 # Vision loads on the first call and costs ~2x steady state; saying so keeps a
                 # one-off from being read as a regression (same reason the judge line does it)
                 note = "（首次，含 Vision 加载）" if first_read and t.get("ocr", 0) > 400 else ""
-                # say when the fast in-process capture was refused: otherwise a permanent
-                # fallback looks like ordinary slowness instead of something to report
-                slow_cap = " · 抓屏走了带超时的子进程" \
-                    if t.get("capture_path") == "subprocess" else ""
                 _log(f"读屏 抓取 {t.get('capture', 0):.0f}ms + OCR {t.get('ocr', 0):.0f}ms"
                      f" = {t.get('total', 0):.0f}ms · 读到 {len(msgs)} 条（对方 {len(thems)} 条）"
-                     f"{note}{slow_cap}")
+                     f"{note}")
                 _log(f"新消息 · 预判+生成先跑，停稳 {SETTLE_S}s（连续 {STABLE_READS} 跳不变最早 "
                      f"{EARLY_SETTLE_S}s）后上屏（两次完整分析最小间隔 {MIN_GAP_S}s）")
                 # latest-wins: overwrite the slot, retire the old verdict — only the newest

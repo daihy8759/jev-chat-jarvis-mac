@@ -121,7 +121,10 @@ class HudReplyTests(unittest.TestCase):
                          (HUD['AppKit'].NSOnState,))
 
     def test_transient_missing_input_target_does_not_abort_read(self):
-        HUD['fill'].locate_input.return_value = None
+        locate = HUD['fill'].locate_input  # shared with FAKE_APP and later tests: restore it
+        original = locate.return_value
+        locate.return_value = None
+        self.addCleanup(setattr, locate, 'return_value', original)
         self.incoming()
         self.assertIsInstance(self.h._input_target, dict)
         self.assertIsNone(self.h._input_target['box'])

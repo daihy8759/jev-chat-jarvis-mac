@@ -210,17 +210,55 @@ def capture_window(wid: int, out: Path,
                            capture_output=True, text=True, timeout=timeout_s)
     except subprocess.TimeoutExpired:
         return False
+    except OSError:
+        # screencapture cannot even start (missing binary, fork or fd failure): report a
+        # failed capture so callers degrade the same way as any other miss.
+        return False
     return p.returncode == 0 and out.exists() and out.stat().st_size > 1000
 
 
-def _load_png_image(path: Path):
-    """Load a PNG into an independent CGImage before its temporary file disappears."""
+def _load_png_image(path: Path, max_size: int | None = None):
+    """Load a PNG into pixels that stay alive after the temporary file disappears.
+
+    Reading the file into NSData keeps the image source memory-backed, so deleting the
+    temp dir cannot pull the data away. When ``max_size`` (the window's point-size
+    square) is known and the capture is larger, resample down to it: ``screencapture``
+    writes the window's Retina backing, and Vision's cost tracks pixel count — the
+    measured ~100 ms OCR figure is 1x.
+    """
     from Foundation import NSData
 
     data = NSData.dataWithContentsOfFile_(str(path))
     source = Quartz.CGImageSourceCreateWithData(data, None) if data else None
     image = Quartz.CGImageSourceCreateImageAtIndex(source, 0, None) if source else None
-    return Quartz.CGImageCreateCopy(image) if image is not None else None
+    if (image is not None and max_size is not None
+            and max(Quartz.CGImageGetWidth(image), Quartz.CGImageGetHeight(image)) > max_size):
+        from Quartz import ImageIO
+
+        opts = {ImageIO.kCGImageSourceThumbnailMaxPixelSize: max_size,
+                ImageIO.kCGImageSourceCreateThumbnailFromImageAlways: True}
+        thumb = Quartz.CGImageSourceCreateThumbnailAtIndex(source, 0, opts)
+        if thumb is not None:
+            return thumb
+    return image
+
+
+def _window_point_size(wid: int) -> int | None:
+    """The window's point-size bounding square, or None if the window is gone.
+
+    Metadata only — no pixel capture, so it cannot hang — mirroring the enumeration
+    find_wechat_window() already runs each tick. This is the size a ``nominal``-scale
+    capture of that window should match.
+    """
+    opts = Quartz.kCGWindowListOptionAll | Quartz.kCGWindowListExcludeDesktopElements
+    for w in Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID):
+        if int(w.get("kCGWindowNumber") or 0) != wid:
+            continue
+        b = dict(w.get("kCGWindowBounds") or {})
+        pw, ph = float(b.get("Width", 0)), float(b.get("Height", 0))
+        if pw > 0 and ph > 0:
+            return int(max(pw, ph))
+    return None
 
 
 # ----------------------------------------------------------------------------- ocr
@@ -277,48 +315,28 @@ def _vision_blocks(handler, languages, chat_only: bool, input_top=None, region=N
     return blocks
 
 
-def ocr(path: Path, languages=("zh-Hans",), chat_only: bool = True, input_top=None) -> list[TextBlock]:
-    """Vision OCR over the chat pane, from a PNG on disk.
-
-    zh-Hans alone: adding "en-US" bought nothing and cost time — on one screenshot the two
-    settings returned text identical *block for block* at 433 ms vs 303 ms, i.e. ~30% of the
-    OCR budget for no change in output. The zh-Hans model reads the Latin words that turn up
-    inside Chinese chat text (product names, URLs, "gpt"/"glm-4-fl") by itself.
-
-    Language correction stays ON (it costs ~30 ms more): it is what repairs ordinary OCR
-    slips such as 记亿力 for 记忆力, and one wrong character changes what the judge reads.
-
-    This is the file-based OCR helper; production capture uses the same subprocess-backed
-    image source before handing pixels to Vision.
-    """
-    import Vision
-    from Foundation import NSURL
-
-    url = NSURL.fileURLWithPath_(str(path))
-    handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(url, None)
-    return _vision_blocks(handler, languages, chat_only, input_top)
-
-
 def capture_image(wid: int, nominal: bool = True):
     """Return a window image without calling cancellable-in-no-way CoreGraphics APIs.
 
-    ``nominal`` is retained for call-site compatibility. The production path deliberately
-    uses the timed subprocess route for every caller: a Python thread cannot cancel
+    The timed subprocess route is deliberate: a Python thread cannot cancel
     ``CGWindowListCreateImage`` after macOS enters ScreenCaptureKit, while this subprocess
     can be terminated by ``capture_window`` when the system capture service stalls.
+    ``screencapture`` writes the window at its Retina backing scale; when ``nominal`` is
+    set the result is resampled down to the window's point size, keeping Vision OCR at
+    the measured 1x cost and pixel/point consumers at the size they were tuned on.
     """
     try:
         with tempfile.TemporaryDirectory() as td:
             png = Path(td) / "wechat.png"
             if not capture_window(wid, png):
                 return None
-            return _load_png_image(png)
+            return _load_png_image(png, _window_point_size(wid) if nominal else None)
     except Exception:
         return None
 
 
 def ocr_image(image, languages=("zh-Hans",), chat_only: bool = True, input_top=None, region=None) -> list[TextBlock]:
-    """Same request as ocr(), fed a CGImage directly — no PNG encode, no temp file."""
+    """Same tuned Vision request, fed a CGImage directly — no PNG encode, no temp file."""
     import Vision
     handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(image, None)
     return _vision_blocks(handler, languages, chat_only, input_top, region)
@@ -613,17 +631,16 @@ def read_conversation(max_messages: int = 12, previous_wid: int | None = None,
     # Always use the subprocess path in production. A Python thread cannot cancel
     # CGWindowListCreateImage once macOS enters ScreenCaptureKit, while a timed
     # subprocess can be terminated and the HUD worker remains reusable.
-    image = None
-    capture_path = "subprocess"
     window = {"wid": win.wid, "title": win.title, "w": win.w, "h": win.h,
               "x": win.x, "y": win.y}
     # Use the same captured pixels for the input boundary and OCR. Never reuse a
-    # previous window's boundary after resizing or switching windows.
-    if image is None:
-        with tempfile.TemporaryDirectory() as td:
-            png = Path(td) / "wechat.png"
-            if capture_window(win.wid, png):
-                image = _load_png_image(png)
+    # previous window's boundary after resizing or switching windows. The image is
+    # resampled down to the window's point size: screencapture writes the Retina
+    # backing, and Vision's cost tracks pixel count (the measured ~100 ms figure is 1x).
+    with tempfile.TemporaryDirectory() as td:
+        png = Path(td) / "wechat.png"
+        image = (_load_png_image(png, _window_point_size(win.wid))
+                 if capture_window(win.wid, png) else None)
     if calibration is not None:
         if image is None:
             return {"ok": False, "error": "capture failed", "messages": []}
@@ -656,7 +673,7 @@ def read_conversation(max_messages: int = 12, previous_wid: int | None = None,
     if layout == prev_layout and _same_frame(fingerprint, prev_fingerprint):
         total = (time.perf_counter() - t0) * 1000
         timing = {"capture": total, "ocr": 0.0, "total": total,
-                  "capture_path": capture_path}
+                  "capture_path": "subprocess"}
         return {"ok": True, "unchanged": True, "messages": [], "fingerprint": fingerprint,
                 "chat_title": "", "window": window, "n_blocks": 0,
                 "layout": layout, "input_rect": visual_rect,
@@ -672,7 +689,7 @@ def read_conversation(max_messages: int = 12, previous_wid: int | None = None,
     msgs = (extract_messages(blocks, max_messages=max_messages, input_top=input_top)
             if outline else [])
     timing = {"capture": (t_cap - t0) * 1000, "ocr": (t_ocr - t_cap) * 1000,
-              "total": (t_ocr - t0) * 1000, "capture_path": capture_path}
+              "total": (t_ocr - t0) * 1000, "capture_path": "subprocess"}
     return {
         "ok": True,
         "unchanged": False,
