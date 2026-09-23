@@ -1,0 +1,49 @@
+# 子 issue 收官：父 issue 的子 issue 全部关闭时，自动关闭父 issue。
+# GitHub 原生 sub-issue 只在父 issue 上维护进度条，不提供「子全关 → 关父」
+# 的自动化；这里监听 issues.closed，由 ci/sub_issue_autoclose.py 沿父链逐层
+# 上爬，把子 issue 已全关的父 issue 关闭并留收官评论。规则与并发/干跑设计
+# 见脚本顶部注释；拆分大 issue 时用 gh issue create --parent 建父子链。
+name: Sub-issue 收官
+
+on:
+  issues:
+    types: [closed]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "试跑：只打印将执行的动作，不写任何 issue"
+        type: boolean
+        default: true
+      start_issue:
+        description: "从哪个 issue 沿父链向上检查（必填）"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  autoclose-parent:
+    name: 沿父链检查并收官
+    # ① issues.closed 对 PR 同样触发（PR 与 issue 共享编号），PR 无父子链，不检查；
+    # ② fork 仓库不跑（同 issue-triage 惯例，防御性保留）
+    if: ${{ !github.event.issue.pull_request && github.repository == 'jev-chat/jev-chat-jarvis-mac' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      # 唯一需要的写权限：关 issue、发收官评论（与 issue-triage 一样最小化）
+      issues: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      # 脚本 stdlib-only，runner 自带 python3 直接跑；凭据只用受限的 github.token。
+      # dispatch 演练时默认 dry_run=true，须显式取消勾选才会真关
+      - name: 沿父链检查并收官
+        env:
+          GH_TOKEN: ${{ github.token }}
+          START_ISSUE: ${{ inputs.start_issue || github.event.issue.number }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python3 ci/sub_issue_autoclose.py --dry-run
+          else
+            python3 ci/sub_issue_autoclose.py
+          fi
