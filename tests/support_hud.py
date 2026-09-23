@@ -31,7 +31,7 @@ def hud_harness():
              '_prejudge_loop', '_pregen_loop', '_analyze', '_run_generation', 'reload_conversations',
              '_context_changed', 'save_background', 'configure_context', 'clear_history',
              '_regen_work', '_regenerate_work', 'regenerateReply_', '_rank_payload', '_payload_from_gen',
-             'fillCandidate_', '_warm', '_warm_apps', 'toggleAlwaysOnTop_'}
+             'fillCandidate_', '_warm', '_warm_apps', 'toggleAlwaysOnTop_', 'tick_'}
     methods = [n for n in source.body if isinstance(n, ast.FunctionDef) and n.name in names]
     for method in methods:
         method.decorator_list = []
@@ -53,6 +53,7 @@ def hud_harness():
              'APPS': (fake_app,),
              'screen_capture_ok': Mock(return_value=True), 'request_screen_capture': Mock(),
              'read_conversation': read_conv,
+             'find_wechat_window': Mock(return_value=None),
              'PALETTE': {'muted': None, 'red': 'RED', 'green': 'GREEN', 'amber': None},
              'SLOW_TICK': 1, 'BURST_TICK': .45, 'FAST_TICK': .25, 'BURST_READS': 3,
              'READ_FAILURE_HIDE_S': 2, 'EMPTY_FRAME_REUSE_S': 2,

@@ -68,7 +68,11 @@ import userconfig  # noqa: E402
 
 userconfig.load()   # ~/.config/jev-jarvis/env -> os.environ (Finder apps inherit none)
 
-from perception import screen_capture_ok, request_screen_capture  # noqa: E402
+from perception import (  # noqa: E402
+    find_wechat_window,
+    screen_capture_ok,
+    request_screen_capture,
+)
 from apps.registry import APPS, UNKNOWN, frontmost_app  # noqa: E402  按前台 App 分发（微信 / QQ）
 import judge  # noqa: E402  (model_cached / model_disk_usage: the #38 onboarding + settings)
 from judge import LowMemoryError, ModelNotDownloadedError, make_judge  # noqa: E402
@@ -1612,6 +1616,17 @@ class HudController(NSObject):
         self._set_foreground_state(app)
         if app is None:
             return
+        # Follow the window from cheap metadata every tick, not from read results (#93):
+        # in manual-calibration mode one read is a full multi-second OCR, and positioning
+        # used to wait out two whole read cycles (the two-tick debounce) after a drag.
+        # Metadata-only enumeration, ~1-5 ms. Screen-capture apps only — QQ's panel
+        # follows its AX read path. The read path's applyPosition stays as a backstop;
+        # when both agree the dead-band absorbs the duplicate.
+        if not self._paused and getattr(app, "needs_screen_capture", False):
+            win = find_wechat_window(previous_wid=getattr(self, "_win_wid", None))
+            if win is not None:
+                self._position_near({"wid": win.wid, "x": win.x, "y": win.y,
+                                     "w": win.w, "h": win.h})
         if self._paused or self._busy or time.time() < self._next_read_ts:
             return  # paused, a previous read is still running, or not due yet
         self._busy = True
@@ -1751,9 +1766,10 @@ class HudController(NSObject):
             self._stable_n = 0
             self._next_read_ts = time.time() + SLOW_TICK
 
-        # position immediately: analysis takes seconds, and a delayed correction
-        # showed up as a visible jump after the verdict landed. Pushed on unchanged
-        # frames too — the window can move while its pixels stay identical.
+        # Position from the read result as a backstop only — tick_ now drives
+        # positioning from cheap metadata every tick (#93). This keeps the panel
+        # correct when the window moved mid-read; a same-target push is absorbed
+        # by the dead-band.
         live_window = res["window"]
         live_input_rect = res.get("input_rect")
         self._win_wid = res["window"]["wid"]

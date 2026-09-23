@@ -46,6 +46,8 @@ class HudReplyTests(unittest.TestCase):
         HUD['fill'].has_accessibility.reset_mock()
         HUD['fill'].has_accessibility.return_value = True
         HUD['fill'].request_accessibility.reset_mock()
+        HUD['find_wechat_window'].reset_mock()
+        HUD['find_wechat_window'].return_value = None
         HUD['FAKE_APP'].fill_text.reset_mock()
         HUD['FAKE_APP'].fill_text.return_value = (True, '已填入')
         for name, value in dict(
@@ -119,6 +121,30 @@ class HudReplyTests(unittest.TestCase):
                          (HUD['AppKit'].NSFloatingWindowLevel,))
         self.assertEqual(self.h.always_on_top_item.setState_.call_args_list[-1].args,
                          (HUD['AppKit'].NSOnState,))
+
+    def test_panel_follows_window_even_when_read_not_due(self):
+        """#93: positioning is tick-driven from cheap window metadata, not gated on
+        reads — in manual-calibration mode one read is a multi-second OCR, and the
+        panel used to wait out two full read cycles before snapping to a drag."""
+        win = SimpleNamespace(wid=7, x=100, y=200, w=550, h=719)
+        self.h._app = HUD['FAKE_APP']          # no foreground transition inside tick_
+        self.h._paused = False
+        self.h._busy = True                    # a slow read is in flight …
+        self.h._next_read_ts = time.time() + 60  # … and the next one is not due
+        self.h._refresh_model_status = Mock()
+        self.h._position_near = Mock()
+        HUD['find_wechat_window'].return_value = win
+        self.h.tick_(None)
+        self.h._position_near.assert_called_once_with(
+            {'wid': 7, 'x': 100, 'y': 200, 'w': 550, 'h': 719})
+
+    def test_panel_positioning_skipped_when_paused(self):
+        self.h._app = HUD['FAKE_APP']
+        self.h._paused = True
+        self.h._refresh_model_status = Mock()
+        self.h._position_near = Mock()
+        self.h.tick_(None)
+        self.h._position_near.assert_not_called()
 
     def test_transient_missing_input_target_does_not_abort_read(self):
         locate = HUD['fill'].locate_input  # shared with FAKE_APP and later tests: restore it
