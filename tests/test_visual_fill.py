@@ -105,7 +105,7 @@ class VisualFillTests(unittest.TestCase):
         visual_fill.locate_visual_input.assert_not_called()
         self.assertTrue(all(c.kwargs.get('exclude_toolbar') is False
                             for c in visual_fill.input_text.call_args_list))
-        self.assertEqual(post.call_count,4)  # mouse down/up + Unicode down/up; no Return
+        self.assertEqual(post.call_count,5)  # mouse down/up + Unicode down/up + cursor restore; no Return
 
     def test_manual_draft_blocks_before_click(self):
         target,post=self.manual_target(before='原有草稿')
@@ -118,7 +118,35 @@ class VisualFillTests(unittest.TestCase):
         visual_fill.input_text.side_effect=['','刚输入的草稿']
         ok,_=visual_fill.write_text('hello',target,Mock())
         self.assertFalse(ok)
-        self.assertEqual(post.call_count,2)  # focus click only, no characters
+        self.assertEqual(post.call_count,3)  # focus click + cursor restore, no characters
+
+    def test_cursor_handed_back_after_verified_fill(self):
+        # #107: the synthetic click parks the cursor on the chat input; the gesture
+        # must hand it back (one kCGEventMouseMoved at the pre-click spot) so the
+        # next click — usually a tone switch on the panel — is where the user left it.
+        target,post=self.prepare()
+        app=Mock()
+        app.processIdentifier.return_value=10
+        with patch.object(visual_fill.Q,'CGEventGetLocation',return_value=(123,456)), \
+                patch.object(visual_fill.Q,'CGEventCreateMouseEvent',return_value='restore') as mk:
+            ok,_=visual_fill.write_text('hello',target,app)
+        self.assertTrue(ok)
+        moved=[c for c in mk.call_args_list if c.args[1]==visual_fill.Q.kCGEventMouseMoved]
+        self.assertEqual(len(moved),1)
+        self.assertEqual(moved[0].args[2],(123,456))
+        self.assertEqual(post.call_count,5)  # click down/up + chunk down/up + restore
+
+    def test_no_cursor_move_when_fill_stops_before_click(self):
+        target,post=self.prepare()
+        with patch.object(visual_fill,'window_is_current',side_effect=[True,False]), \
+                patch.object(visual_fill.Q,'CGEventGetLocation') as loc, \
+                patch.object(visual_fill.Q,'CGEventCreateMouseEvent') as mk:
+            ok,reason=visual_fill.write_text('hello',target,Mock())
+        self.assertFalse(ok)
+        self.assertIn('没有获得焦点',reason)  # fails before the click is posted
+        post.assert_not_called()
+        mk.assert_not_called()               # cursor never moved, never restored
+        loc.assert_called()                  # position is read before the click attempt
 
     def test_manual_size_change_blocks_input(self):
         target,post=self.manual_target()
