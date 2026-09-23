@@ -55,8 +55,10 @@ cp -R src "$APP/Contents/Resources/app/src"
 cp pyproject.toml uv.lock README.md .python-version "$APP/Contents/Resources/app/"
 mkdir -p "$APP/Contents/Resources/app/packaging"
 cp packaging/bootstrap_uv.sh "$APP/Contents/Resources/app/packaging/"
-# MIT requires the copyright notice to travel with a distributed copy
+# MIT requires the copyright notice to travel with a distributed copy;
+# NOTICE asks the same of itself on redistribution (#86)
 if [ -f LICENSE ]; then cp LICENSE "$APP/Contents/Resources/app/"; fi
+if [ -f NOTICE ]; then cp NOTICE "$APP/Contents/Resources/app/"; fi
 if [ -f .env.example ]; then cp .env.example "$APP/Contents/Resources/app/"; fi
 # never ship local secrets or caches
 rm -rf "$APP/Contents/Resources/app/src/__pycache__"
@@ -220,6 +222,7 @@ check "锁文件进包（uv.lock）"        "[ -f '$APP/Contents/Resources/app/u
 check "uv 安装脚本进包"             "[ -f '$APP/Contents/Resources/app/packaging/bootstrap_uv.sh' ]"
 check "Python 版本进包"             "[ -f '$APP/Contents/Resources/app/.python-version' ]"
 check "许可证进包（MIT）"           "[ -f '$APP/Contents/Resources/app/LICENSE' ]"
+check "通知文件进包（NOTICE）"       "[ -f '$APP/Contents/Resources/app/NOTICE' ]"
 check "依赖版本已冻结到 $PY_PIN"     "grep -q '${PY_PIN}' '$APP/Contents/Resources/launcher.zsh'"
 check "运行时不会改写已签名包"       "grep -q '^export PYTHONDONTWRITEBYTECODE=1' '$APP/Contents/Resources/launcher.zsh'"
 check "没夹带缓存"                  "[ ! -d '$APP/Contents/Resources/app/src/__pycache__' ]"
