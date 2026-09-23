@@ -80,6 +80,24 @@ class PerceptionTests(unittest.TestCase):
         self.assertAlmostEqual(t['total'], 123.0 + t['ocr'], places=6)
         self.assertEqual(t['capture_path'], 'manual')
 
+    def test_read_conversation_passes_capture_cost_to_calibrated(self):
+        # #110: the calibrated branch must forward the capture-side wall time so the
+        # read log reports real capture cost — this covers the wiring itself.
+        from types import SimpleNamespace
+        from calibration import Calibration
+        import perception
+        cal = Calibration(600, 600, 120, 60, 450, 480)
+        win = SimpleNamespace(wid=1, title='t', w=600, h=600, x=0, y=0)
+        with patch.object(perception, 'find_wechat_window', return_value=win), \
+                patch.object(perception, 'capture_window', return_value=True), \
+                patch.object(perception, '_load_png_image', return_value=object()), \
+                patch.object(perception, 'read_calibrated', return_value={'ok': True}) as rc:
+            res = perception.read_conversation(calibration=cal)
+        self.assertEqual(res, {'ok': True})
+        self.assertGreaterEqual(rc.call_args.kwargs['capture_ms'], 0.0)
+        self.assertLess(rc.call_args.kwargs['capture_ms'], 1000.0)
+        self.assertEqual(rc.call_args.args[2]['wid'], 1)
+
 
 if __name__ == '__main__':
     unittest.main()
