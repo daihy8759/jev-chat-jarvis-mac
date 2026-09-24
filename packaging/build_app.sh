@@ -112,6 +112,7 @@ VENV="$SUPPORT/venv"
 PY_PIN="@PYTHON_PIN@"
 READY_MARKER="$VENV/.jev-ready"
 INSTALL_LOCK="$SUPPORT/venv-install.lock"
+RECLAIM_LOCK="$SUPPORT/venv-install.reclaim.lock"
 LOG="$HOME/Library/Logs/jev-jarvis.log"
 mkdir -p "$SUPPORT" "$(dirname "$LOG")"
 
@@ -181,11 +182,17 @@ lock_owner_is_running() {
 
 install_lock_is_stale() {
     local created_at="" now=""
-    [ -d "$INSTALL_LOCK" ] || return 0
+    [ -d "$INSTALL_LOCK" ] || return 1
     lock_owner_is_running && return 1
     created_at="$(stat -f %m "$INSTALL_LOCK" 2>/dev/null || echo 0)"
     now="$(date +%s)"
     [ $((now - created_at)) -ge 30 ]
+}
+
+release_reclaim_lock() {
+    [ "${reclaim_lock_held:-0}" = 1 ] || return 0
+    rmdir "$RECLAIM_LOCK" 2>/dev/null || true
+    reclaim_lock_held=0
 }
 
 release_install_lock() {
@@ -195,10 +202,17 @@ release_install_lock() {
 }
 
 install_lock_held=0
+reclaim_lock_held=0
 waited_for_install=0
 installed_here=0
 while ! environment_ready; do
-    if mkdir "$INSTALL_LOCK" 2>/dev/null; then
+    if [ -d "$RECLAIM_LOCK" ]; then
+        waited_for_install=1
+        log "另一个启动进程正在恢复依赖安装锁，等待完成"
+        while ! environment_ready && [ -d "$RECLAIM_LOCK" ]; do
+            sleep 1
+        done
+    elif mkdir "$INSTALL_LOCK" 2>/dev/null; then
         install_lock_held=1
         print -r -- "$$" > "$INSTALL_LOCK/pid"
         trap 'release_install_lock' EXIT
@@ -228,14 +242,23 @@ while ! environment_ready; do
         trap - EXIT HUP INT TERM
     else
         waited_for_install=1
-        if install_lock_is_stale; then
-            log "发现遗留的依赖安装锁，准备恢复"
-            rm -rf "$INSTALL_LOCK"
+        if install_lock_is_stale && mkdir "$RECLAIM_LOCK" 2>/dev/null; then
+            reclaim_lock_held=1
+            trap 'release_reclaim_lock' EXIT
+            trap 'release_reclaim_lock; exit 1' HUP INT TERM
+            # The reclaim lock prevents another waiter from creating a fresh install
+            # lock between this second stale check and the removal below.
+            if install_lock_is_stale; then
+                log "发现遗留的依赖安装锁，准备恢复"
+                rm -rf "$INSTALL_LOCK"
+            fi
+            release_reclaim_lock
+            trap - EXIT HUP INT TERM
             continue
         fi
         log "另一个启动进程正在安装依赖，等待完成"
         osascript -e 'display notification "另一个启动进程正在准备运行环境，请稍候" with title "jev-chat-jarvis"' >/dev/null 2>&1
-        while ! environment_ready && ! install_lock_is_stale; do
+        while ! environment_ready && [ -d "$INSTALL_LOCK" ] && [ ! -d "$RECLAIM_LOCK" ] && ! install_lock_is_stale; do
             sleep 1
         done
     fi
