@@ -36,6 +36,11 @@ jobs:
             exit 1
           fi
 
+      # build_app.sh 的回归检查在没有 .venv 的环境走 uv run 兜底（#120）；
+      # 注：setup-uv 自 v8 起不再发布 @v8 这类 major tag，须 pin 完整版本号（同 ci.yml）
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
+
       - name: 构建并发布
         run: ./packaging/release.sh --publish --target "$GITHUB_SHA"
         env:
